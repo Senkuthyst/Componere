@@ -1,0 +1,5 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@layer base { body { margin: 0; font-family: Georgia, 'Times New Roman', serif; } input { @apply w-full border border-moss/70 bg-transparent px-3 py-3 text-stone-100 outline-none focus:border-mint; } }
+@layer components { .label { @apply mb-2 block font-mono text-[10px] uppercase tracking-widest text-stone-400; } .primary { @apply bg-mint px-5 py-3 font-mono text-xs uppercase tracking-widest text-ink; } .secondary { @apply border border-moss px-5 py-3 font-mono text-xs uppercase tracking-widest text-stone-200; } }
