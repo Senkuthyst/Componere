@@ -1,0 +1,9 @@
+import { describe, expect, it } from 'vitest'
+import { MockEscrowAdapter, explorerTransactionUrl, solanaClusters, tempoModerato, validateSolanaUsdc, validateTempoToken } from './index'
+
+describe('chain-agnostic escrow core', () => {
+  it('uses the current official Tempo Moderato configuration', () => { expect(tempoModerato.chainId).toBe(42431); expect(tempoModerato.rpcUrl).toBe('https://rpc.moderato.tempo.xyz'); validateTempoToken(tempoModerato.tokens.alphaUsd.address, 6) })
+  it('rejects incompatible tokens and accepts cluster-specific USDC', () => { expect(() => validateTempoToken('0x0000000000000000000000000000000000000001', 6)).toThrow(); validateSolanaUsdc('devnet', solanaClusters.devnet.usdcMint); expect(() => validateSolanaUsdc('devnet', solanaClusters.mainnet.usdcMint)).toThrow() })
+  it('requires the escrow state sequence before release and prevents refund after release', async () => { const adapter = new MockEscrowAdapter(); const { escrow } = await adapter.create('AGR-1', tempoModerato.tokens.alphaUsd.address, 5_000_000n, 3); await expect(adapter.releaseMilestone(escrow, 0)).rejects.toThrow(); await adapter.fund(escrow); await adapter.approveMilestone(escrow, 0); await adapter.releaseMilestone(escrow, 0); expect(escrow.status).toBe('released'); await expect(adapter.refund(escrow)).rejects.toThrow() })
+  it('normalizes explorer links without claiming cross-chain atomicity', () => { expect(explorerTransactionUrl('tempo-moderato', '0xabc')).toBe('https://explore.testnet.tempo.xyz/tx/0xabc'); expect(explorerTransactionUrl('solana-devnet', 'sig')).toContain('cluster=devnet') })
+})
