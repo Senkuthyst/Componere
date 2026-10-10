@@ -1,0 +1,4 @@
+export type RequestState = 'requested' | 'evaluated' | 'blocked' | 'awaiting_approval' | 'approved' | 'key_authorized' | 'settling' | 'settled' | 'failed' | 'key_revoked'
+const transitions: Record<RequestState, RequestState[]> = { requested: ['evaluated'], evaluated: ['blocked', 'awaiting_approval'], blocked: [], awaiting_approval: ['approved', 'blocked'], approved: ['key_authorized'], key_authorized: ['settling'], settling: ['settled', 'failed'], settled: ['key_revoked'], failed: ['key_revoked'], key_revoked: [] }
+export function canTransition(from: RequestState, to: RequestState): boolean { return transitions[from].includes(to) }
+export function transition(from: RequestState, to: RequestState): RequestState { if (!canTransition(from, to)) throw new Error(`Illegal state transition: ${from} -> ${to}`); return to }

@@ -3,7 +3,36 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "spike": "tsx scripts/spike.ts", "test": "vitest run", "test:watch": "vitest", "typecheck": "tsc --noEmit", "lint": "tsc --noEmit" },
-  "dependencies": { "next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0", "viem": "^2.21.0", "zod": "^3.23.0" },
-  "devDependencies": { "@types/node": "^22.0.0", "@types/react": "^19.0.0", "@types/react-dom": "^19.0.0", "tsx": "^4.19.0", "typescript": "^5.6.0", "vitest": "^2.1.0" }
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "api": "tsx apps/api/src/server.ts",
+    "spike": "tsx scripts/spike.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "express": "^5.3.0",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "viem": "^2.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
 }
