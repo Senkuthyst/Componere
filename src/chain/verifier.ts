@@ -1,0 +1,5 @@
+import { Hex32Schema, type Mandate } from '../core/types'
+export const ACCESS_KEY_ERRORS = { recipient: 'TEMPO_ACCESSKEY_SCOPE_VIOLATION', budget: 'TEMPO_ACCESSKEY_BUDGET_EXCEEDED', replay: 'TEMPO_ACCESSKEY_ALLOWANCE_EXHAUSTED' } as const
+export function validateSettlementReceipt(receipt: { status: 'success' | 'reverted'; memo?: string }, expectedDecisionHash: string): boolean { return receipt.status === 'success' && Hex32Schema.safeParse(receipt.memo).success && receipt.memo?.toLowerCase() === expectedDecisionHash.toLowerCase() }
+export function decodePublicMemo(memo: string): `0x${string}` { return Hex32Schema.parse(memo) as `0x${string}` }
+export function verifyMandate(mandate: Mandate, now = Math.floor(Date.now() / 1000)): boolean { return mandate.period === 0 && mandate.expiry > now && Hex32Schema.safeParse(mandate.decisionHash).success }

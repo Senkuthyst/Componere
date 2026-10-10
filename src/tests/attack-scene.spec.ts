@@ -1,0 +1,3 @@
+import { describe, expect, it } from 'vitest'
+import { simulateBoundedAttack } from '../web/attack-sandbox/attack-vectors'
+describe('bounded blast radius attack scene', () => { it.each([['reroute recipient', 'recipient', 'TEMPO_ACCESSKEY_SCOPE_VIOLATION'], ['inflate budget', 'budget', 'TEMPO_ACCESSKEY_BUDGET_EXCEEDED'], ['replay settlement', 'replay', 'TEMPO_ACCESSKEY_ALLOWANCE_EXHAUSTED']])('models %s as a Tempo access-key revert', (_, vector, error) => { expect(simulateBoundedAttack(vector as 'recipient' | 'budget' | 'replay')).toEqual({ vector, reverted: true, error }) }) })
