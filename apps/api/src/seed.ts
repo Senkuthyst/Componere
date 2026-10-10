@@ -1,0 +1,2 @@
+import { defaultPolicy } from './app.js'
+export const demoSeed = { vendor: { id: 'vendor-demo', address: '0x1111111111111111111111111111111111111111', name: 'Demo Vendor' }, approvers: [{ id: 'bob', role: 'finance' }, { id: 'carol', role: 'controller' }], policy: defaultPolicy }

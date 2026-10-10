@@ -1,26 +1,59 @@
-# Componere v2: Ephemeral Settlement Mandates
+# Componere
 
-Componere turns approval into a deterministic, non-custodial Tempo access key. The approver signs a disposable P-256 worker key scoped to one recipient, one `transferWithMemo(address,uint256,bytes32)` selector, a 4,500 USD ceiling, and a 300-second window.
+Componere turns an approved invoice into a single-use, expiring payment permission on Tempo Moderato testnet, then produces a receipt anyone can verify. Approval is the permission itself: the chain enforces who may call, how much may move, which vendor may receive it, and when the permission expires.
 
-## Quick start
+## Architecture
+
+- `packages/policy-engine`: pure TypeScript rules for vendor, payment and period caps, evidence, PO tolerance, roles, separation of duties, duplicates, token/network allowlists, canonical JSON, and SHA-256 `decisionHash`.
+- `apps/api`: Express + SQLite state machine. Every transition appends actor, timestamp, policy version, and decision hash to `audit_log`. Chain calls go through `TempoAdapter`; the live implementation uses official `viem/tempo` APIs and tests use `MockTempoAdapter`.
+- `apps/web`: Vite + React + Tailwind settlement studio with request, review/approve, receipt/verifier, activity, and attack-scene views.
+- `scripts/spike.ts`: Stage 1 gate against the official access-key API.
+
+## Trust model
+
+Invoice truth, evidence, policy evaluation, and quorum are checked off-chain. Tempo enforces the bounded blast radius: the authorized key is limited to the approved amount, one vendor recipient, one `transferWithMemo` call scope, and a fixed expiry. Invoice contents never go on-chain; only the canonical decision hash is used as the 32-byte memo. This system is not trustless: the API, policy configuration, and key-provisioning authority remain trust points.
+
+## Setup and demo
+
+Testnet only. Fund a root account using the [Moderato faucet](https://tempo.xyz/developers/docs/quickstart/faucet), then configure the environment:
 
 ```sh
+cp .env.example .env
+# Set TEMPO_ROOT_PRIVATE_KEY and TEMPO_RECIPIENT locally; never commit .env.
 npm install
 npm test
 npm run typecheck
 ```
 
-The pure policy engine and canonical SHA-256 decision hash live in `src/core`. `src/chain/access-key.ts` is the Tempo adapter and requires a real `Account` plus an RPC when used against testnet. The attack-scene tests assert the three documented Tempo revert classes without pretending to be an RPC integration test.
-
-Set `NEXT_PUBLIC_TEMPO_RPC_URL` to override the default Moderato endpoint.
-
-## Stage 1 gate spike
-
-The spike uses the official [Tempo access-key guide](https://tempo.xyz/developers/docs/accounts/access-keys) and the AccountKeychain API. Fund the root account from the [Moderato faucet](https://tempo.xyz/developers/docs/quickstart/faucet), copy `.env.example` to `.env`, set `TEMPO_ROOT_PRIVATE_KEY` and `TEMPO_RECIPIENT`, then run:
+Run the API and web app in separate terminals:
 
 ```sh
-npm install
+npm run api
+npm run web
+```
+
+Open `http://localhost:5173`. The seeded demo context is one vendor (`vendor-demo`), two approvers (`bob` / finance and `carol` / controller), and the versioned default policy. Submit a request, approve as finance, settle on Moderato, verify the returned transaction hash, download the receipt JSON, and run the demo-only attack scene.
+
+To run the live Stage 1 gate directly:
+
+```sh
 npm run spike
 ```
 
-It authorizes a P-256 key for 24 hours with a one-time 10 AlphaUSD budget, scoped to `transferWithMemo(address,uint256,bytes32)` and one recipient. The spike prints the remaining limit before and after settlement, decodes the 32-byte memo, exercises wrong-recipient, over-budget, and post-revocation calls, and prints a PASS/FAIL table. Admin keys can authorize and revoke keys but cannot be given expiry, token budgets, or call scopes.
+Without funded credentials the spike intentionally prints a FAIL prerequisite and makes no chain calls. Its fallback is direct backend signing with the decision hash in the memo, with enforcement labeled app-level.
+
+## Verification
+
+```sh
+npm test
+npm run typecheck
+npx vite build --config apps/web/vite.config.ts
+npm run build
+```
+
+## Limitations
+
+- Moderato testnet only; no production chain deployment or audit.
+- The invoice/evidence truth and policy configuration are off-chain responsibilities.
+- Root/admin key provisioning is a trust point and private-key custody is outside this repository.
+- The live adapter retains the ephemeral signer in process memory for the settlement flow; a production deployment needs secure signer lifecycle storage.

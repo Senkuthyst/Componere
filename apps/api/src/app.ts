@@ -2,6 +2,7 @@ import express, { type Request } from 'express'
 import { evaluate, finalizeDecision, type PaymentRequest, type Policy } from '../../../packages/policy-engine/src/index.js'
 import { transition, type RequestState } from './state.js'
 import { MockTempoAdapter, type TempoAdapter } from './tempo-adapter.js'
+import { LiveTempoAdapter } from './live-tempo-adapter.js'
 import { Store, type StoredRequest } from './store.js'
 
 const actor = (request: Request) => ({ id: String(request.header('x-actor-id') ?? ''), role: String(request.header('x-actor-role') ?? '') })
@@ -10,7 +11,7 @@ export const defaultPolicy: Policy = { version: 'policy-1', allowedVendors: ['ve
 function move(store: Store, stored: StoredRequest, next: RequestState, actorId: string) { const previous = stored.state; transition(previous, next); stored.state = next; store.save(stored); store.audit(stored.request.id, previous, next, actorId, stored.decision.policyVersion, stored.decision.decisionHash) }
 function parsePaymentRequest(input: Record<string, unknown>): PaymentRequest { return { ...input, amountBaseUnits: BigInt(String(input.amountBaseUnits)), poAmountBaseUnits: input.poAmountBaseUnits === undefined ? undefined : BigInt(String(input.poAmountBaseUnits)) } as PaymentRequest }
 
-export function createApp(store = new Store(), adapter: TempoAdapter = new MockTempoAdapter(), policy: Policy = defaultPolicy) {
+export function createApp(store = new Store(), adapter: TempoAdapter = process.env.TEMPO_ROOT_PRIVATE_KEY ? new LiveTempoAdapter() : new MockTempoAdapter(), policy: Policy = defaultPolicy) {
   const app = express(); app.set('json replacer', (_: string, value: unknown) => typeof value === 'bigint' ? value.toString() : value); app.use(express.json())
   app.post('/requests', (req, res) => { try { const request = parsePaymentRequest(req.body as Record<string, unknown>); const evaluated = finalizeDecision(evaluate(request, policy, { periodSpendBaseUnits: 0n, duplicateRequests: store.all().map(item => item.request), approvals: [] })); const stored: StoredRequest = { request, decision: evaluated, state: 'requested', approvals: [] }; store.save(stored); move(store, stored, 'evaluated', actor(req).id || 'system'); move(store, stored, evaluated.outcome === 'block' ? 'blocked' : evaluated.outcome === 'needs_approval' ? 'awaiting_approval' : 'approved', actor(req).id || 'system'); res.status(201).json(stored) } catch (error) { res.status(400).json({ error: String(error) }) } })
   app.get('/requests', (_, res) => res.json(store.all()))

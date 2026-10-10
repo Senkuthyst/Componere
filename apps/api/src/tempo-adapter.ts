@@ -1,5 +1,5 @@
 import type { PaymentRequest } from '@componere/policy-engine'
-export type Mandate = { keyId: string; expiry: number; revoked: boolean }
+export type Mandate = { keyId: string; expiry: number; revoked: boolean; runtime?: unknown }
 export type Settlement = { txHash: `0x${string}`; recipient: `0x${string}`; amountBaseUnits: bigint; memo: `0x${string}`; confirmed: boolean }
 export type TempoAdapter = { authorize(request: PaymentRequest, decisionHash: `0x${string}`): Promise<Mandate>; transfer(mandate: Mandate, request: PaymentRequest, decisionHash: `0x${string}`): Promise<Settlement>; revoke(mandate: Mandate): Promise<void>; attack(mandate: Mandate, request: PaymentRequest, decisionHash: `0x${string}`): Promise<Record<string, { rejected: boolean; error?: string }>> }
 export class MockTempoAdapter implements TempoAdapter {
