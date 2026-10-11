@@ -5,6 +5,8 @@ import { MockTempoAdapter, type TempoAdapter } from './tempo-adapter.js'
 import { LiveTempoAdapter } from './live-tempo-adapter.js'
 import { Store, type StoredRequest } from './store.js'
 import { AgreementStore } from './agreement-store.js'
+import { AuthStore, type AuthUser } from './auth.js'
+import { seedDemoAgreement } from './demo-seed.js'
 import { acceptRevision, approveMilestone, releaseMilestone, submitMilestone, transition as agreementTransition, type Agreement, type AgreementMilestone } from '../../../packages/agreement-core/src/index.js'
 
 const actor = (request: Request) => ({ id: String(request.header('x-actor-id') ?? ''), role: String(request.header('x-actor-role') ?? '') })
@@ -15,12 +17,63 @@ function parsePaymentRequest(input: Record<string, unknown>): PaymentRequest { r
 
 export function createApp(store = new Store(), adapter: TempoAdapter = process.env.TEMPO_ROOT_PRIVATE_KEY ? new LiveTempoAdapter() : new MockTempoAdapter(), policy: Policy = defaultPolicy) {
   const agreementStore = new AgreementStore(store.db)
-  const app = express(); app.set('json replacer', (_: string, value: unknown) => typeof value === 'bigint' ? value.toString() : value); app.use(express.json())
-  const organization = (req: Request) => String(req.header('x-organization-id') ?? 'org-demo')
-  const agreementActor = (req: Request) => String(req.header('x-actor-id') ?? '')
-  const agreement = (req: Request) => agreementStore.get(req.params.id, organization(req))
-  app.post('/agreements', (req, res) => { try { const input = req.body as { id: string; organizationId?: string; clientId: string; providerId: string; terms: unknown; milestones: { id: string; amountBaseUnits: string; criteria: string }[] }; const org = input.organizationId ?? organization(req); const created: Agreement = { id: input.id, organizationId: org, clientId: input.clientId, providerId: input.providerId, state: 'draft', currentVersion: 1, revisions: [{ version: 1, canonicalHash: `0x${'00'.repeat(32)}`, createdBy: agreementActor(req), createdAt: new Date().toISOString(), terms: input.terms }], acceptances: [], milestones: input.milestones.map((milestone: { id: string; amountBaseUnits: string; criteria: string }): AgreementMilestone => ({ id: milestone.id, amountBaseUnits: BigInt(milestone.amountBaseUnits), status: 'upcoming', evidence: [milestone.criteria] })) }; agreementStore.save(created); agreementStore.event(created, 'created', agreementActor(req) || 'system'); return res.status(201).json(created) } catch (error) { return res.status(400).json({ error: String(error) }) } })
-  app.get('/agreements', (req, res) => res.json(agreementStore.all(organization(req))))
+  const authStore = new AuthStore(store.db)
+  const demoMode = process.env.DEMO_MODE === 'true'
+  if (demoMode) authStore.provisionDemoUsers()
+  const app = express(); app.set('json replacer', (_: string, value: unknown) => typeof value === 'bigint' ? value.toString() : value); app.use((req, res, next) => { const origin = process.env.WEB_ORIGIN ?? 'http://localhost:5173'; if (req.headers.origin === origin) { res.header('Access-Control-Allow-Origin', origin); res.header('Vary', 'Origin'); res.header('Access-Control-Allow-Headers', 'authorization, content-type, x-actor-id, x-actor-role, x-organization-id'); res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS') } if (req.method === 'OPTIONS') return res.sendStatus(204); next() }); app.use(express.json())
+  const authenticatedUser = (req: Request): AuthUser | undefined => authStore.userFromRequest(req)
+  const organization = (req: Request) => authenticatedUser(req)?.organizationId ?? String(req.header('x-organization-id') ?? 'org-demo')
+  const agreementActor = (req: Request) => authenticatedUser(req)?.id ?? String(req.header('x-actor-id') ?? '')
+  const agreement = (req: Request) => {
+    const item = agreementStore.get(req.params.id, organization(req))
+    const user = authenticatedUser(req)
+    return item && (!user || item.clientId === user.id || item.providerId === user.id) ? item : undefined
+  }
+  const requireDemoUser = (req: Request, res: express.Response): AuthUser | true | undefined => {
+    if (!demoMode) return true
+    const user = authenticatedUser(req)
+    if (!user) { res.status(401).json({ error: 'Demo authentication required. Sign in through the demo login.' }); return undefined }
+    return user
+  }
+  if (demoMode) {
+    app.use('/agreements', (req, res, next) => { if (requireDemoUser(req, res)) next() })
+    app.use('/requests', (req, res, next) => { if (requireDemoUser(req, res)) next() })
+    seedDemoAgreement(agreementStore)
+  }
+  app.post('/auth/demo-login', (req, res) => {
+    if (!demoMode) return res.status(503).json({ error: 'Demo accounts are disabled. Set DEMO_MODE=true for local development.' })
+    const role = req.body?.role as 'client' | 'freelancer'
+    if (role !== 'client' && role !== 'freelancer') return res.status(400).json({ error: 'Choose a valid demo role.' })
+    const result = authStore.loginDemo(role, typeof req.body?.password === 'string' ? req.body.password : undefined)
+    return result ? res.json(result) : res.status(401).json({ error: 'Demo account is not provisioned or the password is invalid.' })
+  })
+  app.post('/auth/register', (req, res) => {
+    try {
+      const role = req.body?.role as 'client' | 'freelancer'
+      if (role !== 'client' && role !== 'freelancer') return res.status(400).json({ error: 'Choose client or freelancer.' })
+      return res.status(201).json(authStore.register({ email: String(req.body?.email ?? ''), password: String(req.body?.password ?? ''), displayName: String(req.body?.displayName ?? ''), role, organizationId: typeof req.body?.organizationId === 'string' ? req.body.organizationId : undefined }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to register account.'
+      return res.status(message.includes('UNIQUE') ? 409 : 400).json({ error: message })
+    }
+  })
+  app.post('/auth/login', (req, res) => {
+    const result = authStore.login(String(req.body?.email ?? ''), String(req.body?.password ?? ''))
+    return result ? res.json(result) : res.status(401).json({ error: 'Invalid email or password.' })
+  })
+  app.post('/auth/logout', (req, res) => { authStore.logout(req); return res.status(204).send() })
+  app.get('/auth/me', (req, res) => {
+    const user = authenticatedUser(req)
+    if (!user && demoMode) return res.status(401).json({ error: 'Authentication required.' })
+    return res.json({ user: user ?? null, demoMode })
+  })
+  app.get('/auth/users', (req, res) => {
+    const user = authenticatedUser(req)
+    if (!user) return res.status(401).json({ error: 'Authentication required.' })
+    return res.json({ users: authStore.usersInOrganization(user.organizationId, 'freelancer') })
+  })
+  app.post('/agreements', (req, res) => { const user = requireDemoUser(req, res); if (!user) return; try { const input = req.body as { id: string; organizationId?: string; clientId: string; providerId: string; terms: unknown; milestones: { id: string; amountBaseUnits: string; criteria: string }[] }; if (typeof user !== 'boolean' && (user.role !== 'client' || input.clientId !== user.id)) return res.status(403).json({ error: 'Only the authenticated client can create agreements for their account.' }); const org = typeof user !== 'boolean' ? user.organizationId : input.organizationId ?? organization(req); const created: Agreement = { id: input.id, organizationId: org, clientId: input.clientId, providerId: input.providerId, state: 'draft', currentVersion: 1, revisions: [{ version: 1, canonicalHash: `0x${'00'.repeat(32)}`, createdBy: agreementActor(req), createdAt: new Date().toISOString(), terms: input.terms }], acceptances: [], milestones: input.milestones.map((milestone: { id: string; amountBaseUnits: string; criteria: string }): AgreementMilestone => ({ id: milestone.id, amountBaseUnits: BigInt(milestone.amountBaseUnits), status: 'upcoming', evidence: [milestone.criteria] })) }; agreementStore.save(created); agreementStore.event(created, 'created', agreementActor(req) || 'system'); return res.status(201).json(created) } catch (error) { return res.status(400).json({ error: String(error) }) } })
+  app.get('/agreements', (req, res) => { const user = authenticatedUser(req); const items = agreementStore.all(user?.organizationId ?? organization(req)).filter(item => !user || item.clientId === user.id || item.providerId === user.id); return res.json(items) })
   app.get('/agreements/:id', (req, res) => { const item = agreement(req); return item ? res.json({ ...item, events: agreementStore.events(item.id) }) : res.status(404).json({ error: 'not found' }) })
   app.post('/agreements/:id/review', (req, res) => { const item = agreement(req); if (!item) return res.status(404).json({ error: 'not found' }); try { item.state = agreementTransition(item.state, 'ai_reviewed'); item.state = agreementTransition(item.state, 'awaiting_acceptance'); agreementStore.save(item); agreementStore.event(item, 'ai_reviewed', agreementActor(req) || 'system'); return res.json(item) } catch (error) { return res.status(409).json({ error: String(error) }) } })
   app.post('/agreements/:id/accept', (req, res) => { const item = agreement(req); if (!item) return res.status(404).json({ error: 'not found' }); try { const role = req.body.role as 'client' | 'provider'; const next = acceptRevision(item, agreementActor(req), role, Number(req.body.version)); if (next.state === 'accepted') next.state = agreementTransition(next.state, 'awaiting_funding'); agreementStore.save(next); agreementStore.event(next, `accepted:${role}`, agreementActor(req)); return res.json(next) } catch (error) { return res.status(403).json({ error: String(error) }) } })
