@@ -1,12 +1,6 @@
-import { randomBytes } from 'node:crypto'
-
 export type DemoRole = 'client' | 'freelancer'
-export type DemoSession = {
-  token: string
-  user: { id: string; email: string; displayName: string; role: DemoRole; organizationId: string }
-}
+export type DemoUser = { id: string; email: string; displayName: string; role: DemoRole; organizationId: string }
 
-type DemoUser = DemoSession['user']
 type DemoAgreement = {
   id: string
   organizationId: string
@@ -22,8 +16,6 @@ type DemoAgreement = {
 
 const USERS_KEY = 'componere-demo-users'
 const AGREEMENTS_KEY = 'componere-demo-agreements'
-const SESSION_KEY = 'componere-session'
-const demoPassword = 'ComponereDemo2026!'
 
 const defaultUsers: DemoUser[] = [
   { id: 'demo-client', email: 'client.demo@example.com', displayName: 'Demo Client', role: 'client', organizationId: 'org-demo' },
@@ -84,25 +76,6 @@ function ensureDemoState() {
   if (!agreements.length) persistAgreements([defaultAgreement])
 }
 
-export function readSession(): DemoSession | null {
-  try {
-    const value = typeof window !== 'undefined' ? localStorage.getItem(SESSION_KEY) : null
-    return value ? (JSON.parse(value) as DemoSession | null) : null
-  } catch {
-    return null
-  }
-}
-
-function writeSession(session: DemoSession | null) {
-  if (typeof window !== 'undefined') {
-    if (session) {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(session))
-    } else {
-      localStorage.removeItem(SESSION_KEY)
-    }
-  }
-}
-
 function getUsers(): DemoUser[] {
   ensureDemoState()
   return safeRead<DemoUser[]>(USERS_KEY, defaultUsers)
@@ -113,24 +86,8 @@ function getAgreements(): DemoAgreement[] {
   return safeRead<DemoAgreement[]>(AGREEMENTS_KEY, [defaultAgreement])
 }
 
-function findUserByEmail(email: string) {
-  return getUsers().find(user => user.email.toLowerCase() === email.trim().toLowerCase())
-}
-
-function createToken() {
-  return `demo-${randomBytes(16).toString('hex')}`
-}
-
 function cloneAgreement(agreement: DemoAgreement): DemoAgreement {
   return JSON.parse(JSON.stringify(agreement)) as DemoAgreement
-}
-
-function getAuthenticatedUser(request: RequestInit): DemoUser | undefined {
-  const auth = request.headers && 'Authorization' in request.headers ? String((request.headers as Record<string, unknown>).Authorization ?? '') : ''
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-  if (!token) return undefined
-  const session = readSession()
-  return session && session.token === token ? session.user : undefined
 }
 
 function upsertAgreement(updated: DemoAgreement) {
@@ -142,70 +99,14 @@ function upsertAgreement(updated: DemoAgreement) {
   return updated
 }
 
-export async function demoApiRequest<T>(path: string, init: RequestInit = {}, session = readSession()): Promise<T> {
+export async function demoApiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   ensureDemoState()
 
   const method = (init.method ?? 'GET').toUpperCase()
   const body = init.body ? JSON.parse(String(init.body)) : undefined
 
-  if (path === '/auth/demo-login') {
-    const role = body?.role as DemoRole
-    if (role !== 'client' && role !== 'freelancer') throw new Error('Choose a valid demo role.')
-    const user = getUsers().find(item => item.role === role)
-    if (!user) throw new Error('Demo account is unavailable.')
-    const token = createToken()
-    const nextSession: DemoSession = { token, user }
-    writeSession(nextSession)
-    return { user, token } as T
-  }
-
-  if (path === '/auth/register') {
-    const email = String(body?.email ?? '').trim().toLowerCase()
-    const password = String(body?.password ?? '')
-    const displayName = String(body?.displayName ?? '').trim()
-    const role = body?.role as DemoRole
-    if (!email.includes('@') || password.length < 12 || displayName.length < 2 || (role !== 'client' && role !== 'freelancer')) {
-      throw new Error('Email, display name, and a password of at least 12 characters are required.')
-    }
-    const existing = findUserByEmail(email)
-    if (existing) throw new Error('Account already exists.')
-    const user = { id: `user-${randomBytes(12).toString('hex')}`, email, displayName, role, organizationId: `org-${Math.random().toString(36).slice(2, 9)}` }
-    const users = getUsers()
-    users.push(user)
-    persistUsers(users)
-    const token = createToken()
-    const nextSession: DemoSession = { token, user }
-    writeSession(nextSession)
-    return { user, token } as T
-  }
-
-  if (path === '/auth/login') {
-    const email = String(body?.email ?? '').trim().toLowerCase()
-    const password = String(body?.password ?? '')
-    const user = findUserByEmail(email)
-    if (!user || password !== demoPassword) {
-      throw new Error('Invalid email or password.')
-    }
-    const token = createToken()
-    const nextSession: DemoSession = { token, user }
-    writeSession(nextSession)
-    return { user, token } as T
-  }
-
-  if (path === '/auth/logout') {
-    writeSession(null)
-    return undefined as T
-  }
-
-  if (path === '/auth/me') {
-    return { user: session?.user ?? null, demoMode: true } as T
-  }
-
-  if (path === '/auth/users') {
-    const requester = session?.user ?? readSession()?.user
-    if (!requester) throw new Error('Authentication required.')
-    const users = getUsers().filter(user => user.organizationId === requester.organizationId)
-    return { users } as T
+  if (path === '/users') {
+    return { users: getUsers() } as T
   }
 
   if (path === '/agreements' && method === 'GET') {
@@ -213,27 +114,25 @@ export async function demoApiRequest<T>(path: string, init: RequestInit = {}, se
   }
 
   if (path === '/agreements' && method === 'POST') {
-    const requester = session?.user ?? readSession()?.user
-    if (!requester) throw new Error('Authentication required.')
     const payload = (body ?? {}) as { id?: string; clientId?: string; providerId?: string; title?: string; description?: string }
     const id = String(payload.id ?? `AGR-${Date.now()}`)
     const agreement: DemoAgreement = {
       id,
-      organizationId: requester.organizationId,
-      clientId: payload.clientId ?? requester.id,
+      organizationId: 'org-demo',
+      clientId: payload.clientId ?? 'demo-client',
       providerId: payload.providerId ?? 'demo-freelancer',
       state: 'draft',
       currentVersion: 1,
       revisions: [{
         version: 1,
         canonicalHash: `0x${'ee'.repeat(32)}`,
-        createdBy: requester.id,
+        createdBy: payload.clientId ?? 'demo-client',
         createdAt: new Date().toISOString(),
         terms: { title: payload.title ?? 'New agreement', label: 'DRAFT', description: payload.description ?? 'Draft agreement created in demo mode.' },
       }],
       acceptances: [],
       milestones: [{ id: 'm1', amountBaseUnits: '100000000', status: 'upcoming', evidence: [] }],
-      events: [{ id: `event-${Date.now()}`, actorId: requester.id, type: 'created', at: new Date().toISOString(), note: 'Created in demo mode' }],
+      events: [{ id: `event-${Date.now()}`, actorId: payload.clientId ?? 'demo-client', type: 'created', at: new Date().toISOString(), note: 'Created in demo mode' }],
     }
     upsertAgreement(agreement)
     return agreement as T
@@ -260,7 +159,7 @@ export async function demoApiRequest<T>(path: string, init: RequestInit = {}, se
     }
     if (action === 'accept') {
       agreement.state = 'awaiting_funding'
-      agreement.acceptances.push({ version: agreement.currentVersion, actorId: String((body ?? {}).actorId ?? session?.user?.id ?? 'demo-client'), role: (body ?? {}).role === 'provider' ? 'provider' : 'client', acceptedAt: new Date().toISOString() })
+      agreement.acceptances.push({ version: agreement.currentVersion, actorId: String((body ?? {}).actorId ?? 'demo-client'), role: (body ?? {}).role === 'provider' ? 'provider' : 'client', acceptedAt: new Date().toISOString() })
     }
     if (action === 'fund') {
       agreement.state = 'funded'
@@ -268,7 +167,7 @@ export async function demoApiRequest<T>(path: string, init: RequestInit = {}, se
     if (action === 'submit') {
       agreement.state = 'in_progress'
       const milestoneId = String((body ?? {}).milestoneId ?? agreement.milestones[0]?.id ?? 'm1')
-      agreement.milestones = agreement.milestones.map(item => item.id === milestoneId ? { ...item, status: 'submitted', submittedBy: session?.user?.id ?? 'demo-freelancer' } : item)
+      agreement.milestones = agreement.milestones.map(item => item.id === milestoneId ? { ...item, status: 'submitted', submittedBy: 'demo-freelancer' } : item)
     }
     if (action === 'approve-milestone') {
       agreement.state = 'awaiting_approval'
@@ -290,20 +189,12 @@ export async function demoApiRequest<T>(path: string, init: RequestInit = {}, se
     return [] as T
   }
 
-  if (path === '/auth/demo-login' && method === 'POST') {
-    return { user: session?.user, token: session?.token ?? createToken() } as T
-  }
-
   return {} as T
 }
 
 export function isDemoModeEnabled() {
   if (typeof window === 'undefined') return false
   return String(import.meta.env.VITE_DEMO_MODE ?? '').toLowerCase() === 'true' || !String(import.meta.env.VITE_API_URL ?? '')
-}
-
-export function getDemoPassword() {
-  return demoPassword
 }
 
 export function listDemoUsers() {

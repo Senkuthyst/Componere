@@ -5,11 +5,19 @@ import { MockTempoAdapter, type TempoAdapter } from './tempo-adapter.js'
 import { LiveTempoAdapter } from './live-tempo-adapter.js'
 import { Store, type StoredRequest } from './store.js'
 import { AgreementStore } from './agreement-store.js'
-import { AuthStore, type AuthUser } from './auth.js'
 import { seedDemoAgreement } from './demo-seed.js'
 import { acceptRevision, approveMilestone, releaseMilestone, submitMilestone, transition as agreementTransition, type Agreement, type AgreementMilestone } from '../../../packages/agreement-core/src/index.js'
 
-const actor = (request: Request) => ({ id: String(request.header('x-actor-id') ?? ''), role: String(request.header('x-actor-role') ?? '') })
+const actor = (request: Request) => ({
+  id: String(request.header('x-actor-id') ?? ''),
+  role: String(request.header('x-actor-role') ?? '')
+})
+
+const defaultUsers = [
+  { id: 'demo-client', email: 'client.demo@example.com', displayName: 'Demo Client', role: 'client', organizationId: 'org-demo' },
+  { id: 'demo-freelancer', email: 'freelancer.demo@example.com', displayName: 'Demo Freelancer', role: 'freelancer', organizationId: 'org-demo' },
+]
+
 export const defaultPolicy: Policy = { version: 'policy-1', allowedVendors: ['vendor-demo'], tokenAllowlist: ['0x20c0000000000000000000000000000000000001'], networkAllowlist: ['tempo-moderato'], perPaymentCapBaseUnits: 4_500_000_000n, perPeriodCapBaseUnits: 4_500_000_000n, periodSeconds: 86400, requiredEvidence: ['invoice'], poToleranceBaseUnits: 0n, approvalThresholds: [{ role: 'finance', minBaseUnits: 0n }], minimumApprovals: 1 }
 
 function move(store: Store, stored: StoredRequest, next: RequestState, actorId: string) { const previous = stored.state; requestTransition(previous, next); stored.state = next; store.save(stored); store.audit(stored.request.id, previous, next, actorId, stored.decision.policyVersion, stored.decision.decisionHash) }
@@ -17,9 +25,8 @@ function parsePaymentRequest(input: Record<string, unknown>): PaymentRequest { r
 
 export function createApp(store = new Store(), adapter: TempoAdapter = (process.env.TEMPO_ROOT_PRIVATE_KEY && /^0x[0-9a-fA-F]{64}$/.test(process.env.TEMPO_ROOT_PRIVATE_KEY)) ? new LiveTempoAdapter() : new MockTempoAdapter(), policy: Policy = defaultPolicy) {
   const agreementStore = new AgreementStore(store.db)
-  const authStore = new AuthStore(store.db)
   const demoMode = process.env.DEMO_MODE === 'true'
-  if (demoMode) authStore.provisionDemoUsers()
+  if (demoMode) seedDemoAgreement(agreementStore)
 
   const app = express()
   app.set('json replacer', (_: string, value: unknown) => typeof value === 'bigint' ? value.toString() : value)
@@ -67,84 +74,24 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
 
   const apiRouter = express.Router()
 
-  const authenticatedUser = (req: Request): AuthUser | undefined => authStore.userFromRequest(req)
-  const organization = (req: Request) => authenticatedUser(req)?.organizationId ?? String(req.header('x-organization-id') ?? 'org-demo')
-  const agreementActor = (req: Request) => authenticatedUser(req)?.id ?? String(req.header('x-actor-id') ?? '')
+  const organization = (req: Request) => String(req.header('x-organization-id') ?? 'org-demo')
+  const agreementActor = (req: Request) => String(req.header('x-actor-id') ?? req.body?.actorId ?? '')
   const agreement = (req: Request): Agreement | undefined => {
-    const item = agreementStore.getById(req.params.id)
-    if (!item) return undefined
-    const user = authenticatedUser(req)
-    const org = organization(req)
-    if (user) {
-      if (item.clientId === user.id || item.providerId === user.id || item.organizationId === user.organizationId) {
-        return item
-      }
-      return undefined
-    }
-    if (item.organizationId === org) return item
-    const actorId = agreementActor(req)
-    if (actorId && (item.clientId === actorId || item.providerId === actorId)) return item
-    return undefined
-  }
-  const requireDemoUser = (req: Request, res: express.Response): AuthUser | true | undefined => {
-    if (!demoMode) return true
-    const user = authenticatedUser(req)
-    if (!user) { res.status(401).json({ error: 'Demo authentication required. Sign in through the demo login.' }); return undefined }
-    return user
+    return agreementStore.getById(req.params.id)
   }
 
-  if (demoMode) {
-    apiRouter.use('/agreements', (req, res, next) => { if (requireDemoUser(req, res)) next() })
-    apiRouter.use('/requests', (req, res, next) => { if (requireDemoUser(req, res)) next() })
-    seedDemoAgreement(agreementStore)
-  }
-
-  apiRouter.post('/auth/demo-login', (req, res) => {
-    if (!demoMode) return res.status(503).json({ error: 'Demo accounts are disabled. Set DEMO_MODE=true for local development.' })
-    const role = req.body?.role as 'client' | 'freelancer'
-    if (role !== 'client' && role !== 'freelancer') return res.status(400).json({ error: 'Choose a valid demo role.' })
-    const result = authStore.loginDemo(role, typeof req.body?.password === 'string' ? req.body.password : undefined)
-    return result ? res.json(result) : res.status(401).json({ error: 'Demo account is not provisioned or the password is invalid.' })
-  })
-
-  apiRouter.post('/auth/register', (req, res) => {
-    try {
-      const role = req.body?.role as 'client' | 'freelancer'
-      if (role !== 'client' && role !== 'freelancer') return res.status(400).json({ error: 'Choose client or freelancer.' })
-      return res.status(201).json(authStore.register({ email: String(req.body?.email ?? ''), password: String(req.body?.password ?? ''), displayName: String(req.body?.displayName ?? ''), role, organizationId: typeof req.body?.organizationId === 'string' ? req.body.organizationId : undefined }))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to register account.'
-      const userMessage = message.includes('UNIQUE') ? 'An account with this email already exists.' : message
-      return res.status(message.includes('UNIQUE') ? 409 : 400).json({ error: userMessage })
-    }
-  })
-
-  apiRouter.post('/auth/login', (req, res) => {
-    const result = authStore.login(String(req.body?.email ?? ''), String(req.body?.password ?? ''))
-    return result ? res.json(result) : res.status(401).json({ error: 'Invalid email or password.' })
-  })
-
-  apiRouter.post('/auth/logout', (req, res) => { authStore.logout(req); return res.status(204).send() })
-
-  apiRouter.get('/auth/me', (req, res) => {
-    const user = authenticatedUser(req)
-    if (!user && demoMode) return res.status(401).json({ error: 'Authentication required.' })
-    return res.json({ user: user ?? null, demoMode })
-  })
-
-  apiRouter.get('/auth/users', (req, res) => {
-    const user = authenticatedUser(req)
-    if (!user) return res.status(401).json({ error: 'Authentication required.' })
-    return res.json({ users: authStore.usersInOrganization(user.organizationId, 'freelancer') })
+  apiRouter.get('/users', (_req, res) => {
+    return res.json({ users: defaultUsers })
   })
 
   apiRouter.post('/agreements', (req, res) => {
-    const user = requireDemoUser(req, res)
-    if (!user) return
     try {
       const input = req.body as { id: string; organizationId?: string; clientId: string; providerId: string; terms: unknown; milestones: { id: string; amountBaseUnits: string; criteria: string }[] }
-      if (typeof user !== 'boolean' && (user.role !== 'client' || input.clientId !== user.id)) return res.status(403).json({ error: 'Only the authenticated client can create agreements for their account.' })
-      const org = typeof user !== 'boolean' ? user.organizationId : input.organizationId ?? organization(req)
+      if (!input?.id || !input?.clientId || !input?.providerId) {
+        return res.status(400).json({ error: 'Missing required agreement fields' })
+      }
+      const org = input.organizationId ?? organization(req)
+      const actorId = agreementActor(req) || input.clientId
       const created: Agreement = {
         id: input.id,
         organizationId: org,
@@ -152,12 +99,12 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
         providerId: input.providerId,
         state: 'draft',
         currentVersion: 1,
-        revisions: [{ version: 1, canonicalHash: `0x${'00'.repeat(32)}`, createdBy: agreementActor(req), createdAt: new Date().toISOString(), terms: input.terms }],
+        revisions: [{ version: 1, canonicalHash: `0x${'00'.repeat(32)}`, createdBy: actorId, createdAt: new Date().toISOString(), terms: input.terms }],
         acceptances: [],
-        milestones: input.milestones.map((milestone: { id: string; amountBaseUnits: string; criteria: string }): AgreementMilestone => ({ id: milestone.id, amountBaseUnits: BigInt(milestone.amountBaseUnits), status: 'upcoming', evidence: [milestone.criteria] }))
+        milestones: (input.milestones ?? []).map((milestone: { id: string; amountBaseUnits: string; criteria: string }): AgreementMilestone => ({ id: milestone.id, amountBaseUnits: BigInt(milestone.amountBaseUnits), status: 'upcoming', evidence: [milestone.criteria] }))
       }
       agreementStore.save(created)
-      agreementStore.event(created, 'created', agreementActor(req) || 'system')
+      agreementStore.event(created, 'created', actorId || 'system')
       return res.status(201).json(created)
     } catch (error) {
       return res.status(400).json({ error: error instanceof Error ? error.message : String(error) })
@@ -165,9 +112,9 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
   })
 
   apiRouter.get('/agreements', (req, res) => {
-    const user = authenticatedUser(req)
-    const org = user?.organizationId ?? organization(req)
-    const items = agreementStore.allForUser(org, user?.id)
+    const org = organization(req)
+    const actorId = req.header('x-actor-id') ? String(req.header('x-actor-id')) : undefined
+    const items = agreementStore.allForUser(org, actorId)
     return res.json(items)
   })
 
@@ -194,9 +141,9 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
     const item = agreement(req)
     if (!item) return res.status(404).json({ error: 'not found' })
     try {
-      const actorId = agreementActor(req)
       let role = req.body?.role as 'client' | 'provider' | 'freelancer'
       if (role === 'freelancer') role = 'provider'
+      const actorId = agreementActor(req) || (role === 'provider' ? item.providerId : item.clientId)
       if (!role) {
         role = actorId === item.clientId ? 'client' : 'provider'
       }
@@ -215,12 +162,13 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
     const item = agreement(req)
     if (!item) return res.status(404).json({ error: 'not found' })
     if (req.body?.mode !== 'demo') return res.status(409).json({ error: 'Live escrow funding requires a verified deployed contract and wallet adapter' })
-    if (agreementActor(req) !== item.clientId) return res.status(403).json({ error: 'Only the client can fund an agreement' })
+    const currentActor = agreementActor(req) || item.clientId
+    if (currentActor !== item.clientId) return res.status(403).json({ error: 'Only the client can fund an agreement' })
     try {
       item.state = agreementTransition(item.state, 'funded')
       item.state = agreementTransition(item.state, 'in_progress')
       agreementStore.save(item)
-      agreementStore.event(item, 'funded:demo-unverified', agreementActor(req))
+      agreementStore.event(item, 'funded:demo-unverified', currentActor)
       return res.json({ ...item, funding: { mode: 'demo', verifiedOnChain: false } })
     } catch (error) {
       return res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
@@ -231,9 +179,10 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
     const item = agreement(req)
     if (!item) return res.status(404).json({ error: 'not found' })
     try {
-      const next = submitMilestone(item, String(req.body?.milestoneId ?? ''), agreementActor(req), Array.isArray(req.body?.evidence) ? req.body.evidence : [])
+      const currentActor = agreementActor(req) || item.providerId
+      const next = submitMilestone(item, String(req.body?.milestoneId ?? ''), currentActor, Array.isArray(req.body?.evidence) ? req.body.evidence : [])
       agreementStore.save(next)
-      agreementStore.event(next, 'milestone_submitted', agreementActor(req))
+      agreementStore.event(next, 'milestone_submitted', currentActor)
       return res.json(next)
     } catch (error) {
       return res.status(403).json({ error: error instanceof Error ? error.message : String(error) })
@@ -244,9 +193,10 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
     const item = agreement(req)
     if (!item) return res.status(404).json({ error: 'not found' })
     try {
-      const next = approveMilestone(item, String(req.body?.milestoneId ?? ''), agreementActor(req))
+      const currentActor = agreementActor(req) || item.clientId
+      const next = approveMilestone(item, String(req.body?.milestoneId ?? ''), currentActor)
       agreementStore.save(next)
-      agreementStore.event(next, 'milestone_approved', agreementActor(req))
+      agreementStore.event(next, 'milestone_approved', currentActor)
       return res.json(next)
     } catch (error) {
       return res.status(403).json({ error: error instanceof Error ? error.message : String(error) })
@@ -257,9 +207,10 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
     const item = agreement(req)
     if (!item) return res.status(404).json({ error: 'not found' })
     try {
-      const next = releaseMilestone(item, String(req.body?.milestoneId ?? ''), agreementActor(req))
+      const currentActor = agreementActor(req) || item.clientId
+      const next = releaseMilestone(item, String(req.body?.milestoneId ?? ''), currentActor)
       agreementStore.save(next)
-      agreementStore.event(next, 'milestone_release_authorized', agreementActor(req))
+      agreementStore.event(next, 'milestone_release_authorized', currentActor)
       return res.json(next)
     } catch (error) {
       return res.status(403).json({ error: error instanceof Error ? error.message : String(error) })
