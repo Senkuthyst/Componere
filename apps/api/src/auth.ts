@@ -41,8 +41,10 @@ export class AuthStore {
     const id = `user-${randomBytes(12).toString('hex')}`
     const salt = randomBytes(16)
     const passwordHash = hashPassword(input.password, salt)
-    this.db.prepare('INSERT INTO auth_users (id, email, display_name, role, organization_id, password_salt, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, email, input.displayName.trim(), input.role, input.organizationId ?? `org-${id}`, salt, passwordHash)
-    const user = { id, email, display_name: input.displayName.trim(), role: input.role, organization_id: input.organizationId ?? `org-${id}` }
+    const demoMode = process.env.DEMO_MODE === 'true'
+    const orgId = input.organizationId ?? (demoMode ? 'org-demo' : `org-${id}`)
+    this.db.prepare('INSERT INTO auth_users (id, email, display_name, role, organization_id, password_salt, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, email, input.displayName.trim(), input.role, orgId, salt, passwordHash)
+    const user = { id, email, display_name: input.displayName.trim(), role: input.role, organization_id: orgId }
     const mapped = toUser(user)
     if (!mapped) throw new Error('Unable to create the requested account role.')
     return { user: mapped, token: sessionToken(this.db, id) }
@@ -64,21 +66,24 @@ export class AuthStore {
 
   logout(request: Request) {
     const value = request.header('authorization')
-    if (value?.startsWith('Bearer ')) {
-      const tokenHash = scryptSync(value.slice(7), 'componere-session', 32).toString('hex')
+    const match = value?.match(/^Bearer\s+(.+)$/i)
+    if (match?.[1]) {
+      const tokenHash = scryptSync(match[1].trim(), 'componere-session', 32).toString('hex')
       this.db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(tokenHash)
     }
-
   }
 
   usersInOrganization(organizationId: string, role: DemoRole) {
-    return (this.db.prepare('SELECT id, email, display_name, role, organization_id FROM auth_users WHERE organization_id = ? AND role = ? ORDER BY display_name').all(organizationId, role) as { id: string; email: string; display_name: string; role: string; organization_id: string }[]).map(toUser).filter((user): user is AuthUser => Boolean(user))
+    const inOrg = (this.db.prepare('SELECT id, email, display_name, role, organization_id FROM auth_users WHERE organization_id = ? AND role = ? ORDER BY display_name').all(organizationId, role) as { id: string; email: string; display_name: string; role: string; organization_id: string }[]).map(toUser).filter((user): user is AuthUser => Boolean(user))
+    if (inOrg.length > 0) return inOrg
+    return (this.db.prepare('SELECT id, email, display_name, role, organization_id FROM auth_users WHERE role = ? ORDER BY display_name').all(role) as { id: string; email: string; display_name: string; role: string; organization_id: string }[]).map(toUser).filter((user): user is AuthUser => Boolean(user))
   }
 
   userFromRequest(request: Request): AuthUser | undefined {
     const value = request.header('authorization')
-    if (!value?.startsWith('Bearer ')) return undefined
-    const tokenHash = scryptSync(value.slice(7), 'componere-session', 32).toString('hex')
+    const match = value?.match(/^Bearer\s+(.+)$/i)
+    if (!match?.[1]) return undefined
+    const tokenHash = scryptSync(match[1].trim(), 'componere-session', 32).toString('hex')
     const row = this.db.prepare('SELECT auth_users.id, auth_users.email, auth_users.display_name, auth_users.role, auth_users.organization_id FROM auth_sessions JOIN auth_users ON auth_users.id = auth_sessions.user_id WHERE auth_sessions.token_hash = ? AND auth_sessions.expires_at > ?').get(tokenHash, new Date().toISOString()) as { id: string; email: string; display_name: string; role: string; organization_id: string } | undefined
     return row ? toUser(row) : undefined
   }

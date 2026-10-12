@@ -38,4 +38,94 @@ describe('API state machine', () => {
     expect((await request(app).post('/auth/logout').set('authorization', `Bearer ${client.body.token}`)).status).toBe(204)
     expect((await request(app).get('/auth/me').set('authorization', `Bearer ${client.body.token}`)).body.user).toBeNull()
   })
+
+  it('verifies invalid credentials return 401', async () => {
+    const { app } = createApp()
+    const result = await request(app).post('/auth/login').send({ email: 'nonexistent@example.com', password: 'wrongpassword123' })
+    expect(result.status).toBe(401)
+    expect(result.body.error).toBe('Invalid email or password.')
+  })
+
+  it('verifies CORS preflight and headers for 127.0.0.1:5173', async () => {
+    const { app } = createApp()
+    const preflight = await request(app).options('/auth/login').set('Origin', 'http://127.0.0.1:5173')
+    expect(preflight.status).toBe(204)
+    expect(preflight.headers['access-control-allow-origin']).toBe('http://127.0.0.1:5173')
+    expect(preflight.headers['access-control-allow-methods']).toContain('POST')
+
+    const getReq = await request(app).get('/requests').set('Origin', 'http://127.0.0.1:5173')
+    expect(getReq.headers['access-control-allow-origin']).toBe('http://127.0.0.1:5173')
+  })
+
+  it('verifies dual routing for /api and / routes', async () => {
+    const { app } = createApp()
+    const direct = await request(app).get('/requests')
+    const prefixed = await request(app).get('/api/requests')
+    expect(direct.status).toBe(200)
+    expect(prefixed.status).toBe(200)
+    expect(prefixed.body).toEqual(direct.body)
+  })
+
+  it('verifies 404 response for nonexistent endpoints', async () => {
+    const { app } = createApp()
+    const res = await request(app).get('/nonexistent-route')
+    expect(res.status).toBe(404)
+    expect(res.body.error).toContain('Not found')
+  })
+
+  it('verifies 400 response for malformed registration input', async () => {
+    const { app } = createApp()
+    const res = await request(app).post('/auth/register').send({ email: 'bad-email', password: 'short', displayName: '', role: 'client' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBeDefined()
+  })
+
+  it('verifies complete lifecycle: draft -> review -> accept -> fund -> submit -> approve -> release', async () => {
+    const { app } = createApp()
+    const client = await request(app).post('/auth/register').send({ email: 'c2@example.com', password: 'strong password 1234', displayName: 'Client Two', role: 'client', organizationId: 'org-test' })
+    const freelancer = await request(app).post('/auth/register').send({ email: 'f2@example.com', password: 'strong password 1234', displayName: 'Freelancer Two', role: 'freelancer', organizationId: 'org-test' })
+
+    const agreementId = 'AGR-FLOW-101'
+    const created = await request(app).post('/agreements').set('authorization', `Bearer ${client.body.token}`).send({
+      id: agreementId,
+      clientId: client.body.user.id,
+      providerId: freelancer.body.user.id,
+      terms: { title: 'Full flow test' },
+      milestones: [{ id: 'm1', amountBaseUnits: '500000', criteria: 'Review passed' }]
+    })
+    expect(created.status).toBe(201)
+    expect(created.body.state).toBe('draft')
+
+    // AI Review
+    const reviewed = await request(app).post(`/agreements/${agreementId}/review`).set('authorization', `Bearer ${client.body.token}`)
+    expect(reviewed.status).toBe(200)
+    expect(reviewed.body.state).toBe('awaiting_acceptance')
+
+    // Both parties accept
+    const clientAccepted = await request(app).post(`/agreements/${agreementId}/accept`).set('authorization', `Bearer ${client.body.token}`).send({ role: 'client' })
+    expect(clientAccepted.status).toBe(200)
+    const providerAccepted = await request(app).post(`/agreements/${agreementId}/accept`).set('authorization', `Bearer ${freelancer.body.token}`).send({ role: 'provider' })
+    expect(providerAccepted.status).toBe(200)
+    expect(providerAccepted.body.state).toBe('awaiting_funding')
+
+    // Client funds demo escrow
+    const funded = await request(app).post(`/agreements/${agreementId}/fund`).set('authorization', `Bearer ${client.body.token}`).send({ mode: 'demo' })
+    expect(funded.status).toBe(200)
+    expect(funded.body.state).toBe('in_progress')
+
+    // Freelancer submits milestone
+    const submitted = await request(app).post(`/agreements/${agreementId}/submit`).set('authorization', `Bearer ${freelancer.body.token}`).send({ milestoneId: 'm1', evidence: ['Proof URL'] })
+    expect(submitted.status).toBe(200)
+    expect(submitted.body.state).toBe('milestone_submitted')
+
+    // Client approves milestone
+    const approved = await request(app).post(`/agreements/${agreementId}/approve-milestone`).set('authorization', `Bearer ${client.body.token}`).send({ milestoneId: 'm1' })
+    expect(approved.status).toBe(200)
+    expect(approved.body.state).toBe('awaiting_approval')
+
+    // Client releases milestone
+    const released = await request(app).post(`/agreements/${agreementId}/release-milestone`).set('authorization', `Bearer ${client.body.token}`).send({ milestoneId: 'm1' })
+    expect(released.status).toBe(200)
+    expect(released.body.state).toBe('completed')
+  })
 })
