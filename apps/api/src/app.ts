@@ -15,7 +15,7 @@ export const defaultPolicy: Policy = { version: 'policy-1', allowedVendors: ['ve
 function move(store: Store, stored: StoredRequest, next: RequestState, actorId: string) { const previous = stored.state; requestTransition(previous, next); stored.state = next; store.save(stored); store.audit(stored.request.id, previous, next, actorId, stored.decision.policyVersion, stored.decision.decisionHash) }
 function parsePaymentRequest(input: Record<string, unknown>): PaymentRequest { return { ...input, amountBaseUnits: BigInt(String(input.amountBaseUnits)), poAmountBaseUnits: input.poAmountBaseUnits === undefined ? undefined : BigInt(String(input.poAmountBaseUnits)) } as PaymentRequest }
 
-export function createApp(store = new Store(), adapter: TempoAdapter = process.env.TEMPO_ROOT_PRIVATE_KEY ? new LiveTempoAdapter() : new MockTempoAdapter(), policy: Policy = defaultPolicy) {
+export function createApp(store = new Store(), adapter: TempoAdapter = (process.env.TEMPO_ROOT_PRIVATE_KEY && /^0x[0-9a-fA-F]{64}$/.test(process.env.TEMPO_ROOT_PRIVATE_KEY)) ? new LiveTempoAdapter() : new MockTempoAdapter(), policy: Policy = defaultPolicy) {
   const agreementStore = new AgreementStore(store.db)
   const authStore = new AuthStore(store.db)
   const demoMode = process.env.DEMO_MODE === 'true'
