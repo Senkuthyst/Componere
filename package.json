@@ -5,7 +5,9 @@
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "dev": "vite --config apps/web/vite.config.ts --host 127.0.0.1 --port 5173",
+    "dev": "tsx scripts/dev.ts",
+    "dev:api": "tsx apps/api/src/server.ts",
+    "dev:web": "vite --config apps/web/vite.config.ts --host 127.0.0.1 --port 5173",
     "build": "next build",
     "start": "next start",
     "build:web": "vite build --config apps/web/vite.config.ts",

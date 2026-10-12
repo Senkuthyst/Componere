@@ -38,21 +38,30 @@ const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl
 
 async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  const targetUrl = `${apiUrl}${normalizedPath}`
+  const headers = {
+    'x-actor-id': 'demo-client',
+    'x-actor-role': 'client',
+    'x-organization-id': 'org-demo',
+    ...(init.headers ?? {})
+  }
+
   try {
-    const response = await fetch(`${apiUrl}${normalizedPath}`, {
-      ...init,
-      headers: {
-        'x-actor-id': 'demo-client',
-        'x-actor-role': 'client',
-        'x-organization-id': 'org-demo',
-        ...(init.headers ?? {})
-      }
-    })
+    const response = await fetch(targetUrl, { ...init, headers })
     const isJson = response.headers.get('content-type')?.includes('application/json')
     const body = (isJson ? await response.json().catch(() => ({})) : {}) as T & { error?: string }
     if (!response.ok) throw new Error(body.error ?? `Request failed with status ${response.status}`)
     return body as T
   } catch (err) {
+    if (apiUrl !== '/api' && !apiUrl.endsWith('/api') && typeof window !== 'undefined') {
+      try {
+        const proxyResponse = await fetch(`/api${normalizedPath}`, { ...init, headers })
+        const isJson = proxyResponse.headers.get('content-type')?.includes('application/json')
+        const body = (isJson ? await proxyResponse.json().catch(() => ({})) : {}) as T & { error?: string }
+        if (!proxyResponse.ok) throw new Error(body.error ?? `Request failed with status ${proxyResponse.status}`)
+        return body as T
+      } catch {}
+    }
     if (err instanceof Error) throw err
     throw new Error('Network error or server unreachable. Please check API server.')
   }
@@ -426,7 +435,15 @@ function ApiNewAgreement() {
   const [prompt, setPrompt] = useState('Build a SaaS landing page for $5,000. Release $1,000 after design, $2,000 after frontend completion, and $2,000 after final approval.')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  useEffect(() => { void apiRequest<{ users: { id: string; displayName: string; email: string }[] }>('/users').then(result => { setProviders(result.users); setProviderId(result.users[0]?.id ?? '') }).catch(cause => setError(cause instanceof Error ? cause.message : 'Unable to load freelancers.')) }, [])
+  useEffect(() => {
+    void apiRequest<{ users: { id: string; displayName: string; email: string; role?: string }[] }>('/users').then(result => {
+      const freelancers = result.users.filter(u => u.role === 'freelancer')
+      const list = freelancers.length > 0 ? freelancers : result.users.filter(u => u.id !== 'demo-client')
+      const usable = list.length > 0 ? list : result.users
+      setProviders(usable)
+      setProviderId(usable[0]?.id ?? '')
+    }).catch(cause => setError(cause instanceof Error ? cause.message : 'Unable to load freelancers.'))
+  }, [])
   const save = async () => {
     setBusy(true); setError('')
     try {
@@ -502,14 +519,14 @@ function ApiDetails() {
   const [busy, setBusy] = useState('')
   const load = () => { if (id) void apiRequest<ApiAgreement & { events?: ApiAgreement['events'] }>(`/agreements/${id}`).then(setItem).catch(cause => setError(cause instanceof Error ? cause.message : 'Unable to load agreement.')) }
   useEffect(load, [id])
-  const act = async (path: string, body: Record<string, unknown> = {}) => {
+  const act = async (path: string, body: Record<string, unknown> = {}, extraHeaders: Record<string, string> = {}) => {
     if (!id) return
     setBusy(path)
     setError('')
     try {
       const next = await apiRequest<ApiAgreement>(`/agreements/${id}/${path}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...extraHeaders },
         body: JSON.stringify(body)
       })
       setItem(next)
@@ -541,13 +558,13 @@ function ApiDetails() {
                   <span><b>Acceptance criteria</b>{milestone.evidence?.[0] ?? 'No criteria recorded.'}</span>
                 </div>
                 {isProvider && milestone.status === 'upcoming' && (item.state === 'in_progress' || item.state === 'partially_settled') && (
-                  <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('submit', { milestoneId: milestone.id, evidence: milestone.evidence ?? [] })}>{busy === 'submit' ? 'Submitting…' : 'Submit deliverable'}</button>
+                  <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('submit', { milestoneId: milestone.id, evidence: milestone.evidence ?? [], actorId: item.providerId }, { 'x-actor-id': item.providerId, 'x-actor-role': 'freelancer' })}>{busy === 'submit' ? 'Submitting…' : 'Submit deliverable'}</button>
                 )}
                 {isClient && milestone.status === 'submitted' && (
-                  <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('approve-milestone', { milestoneId: milestone.id })}>{busy === 'approve-milestone' ? 'Approving…' : 'Approve milestone'}</button>
+                  <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('approve-milestone', { milestoneId: milestone.id, actorId: item.clientId }, { 'x-actor-id': item.clientId, 'x-actor-role': 'client' })}>{busy === 'approve-milestone' ? 'Approving…' : 'Approve milestone'}</button>
                 )}
                 {isClient && milestone.status === 'approved' && (
-                  <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('release-milestone', { milestoneId: milestone.id })}>{busy === 'release-milestone' ? 'Releasing…' : 'Release payment'}</button>
+                  <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('release-milestone', { milestoneId: milestone.id, actorId: item.clientId }, { 'x-actor-id': item.clientId, 'x-actor-role': 'client' })}>{busy === 'release-milestone' ? 'Releasing…' : 'Release payment'}</button>
                 )}
               </div>
             </div>
@@ -562,19 +579,19 @@ function ApiDetails() {
           </div>
           {isClient && item.state === 'draft' && (
             <div className="panel side-card">
-              <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('review')}>{busy === 'review' ? 'Reviewing…' : 'Review terms with AI'}</button>
+              <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('review', { actorId: item.clientId }, { 'x-actor-id': item.clientId, 'x-actor-role': 'client' })}>{busy === 'review' ? 'Reviewing…' : 'Review terms with AI'}</button>
               <small className="demo-warning">Analyzes terms and transitions agreement to acceptance phase.</small>
             </div>
           )}
           {item.state === 'awaiting_acceptance' && (
             <div className="panel side-card">
-              {isClient && <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('accept', { role: 'client' })}>{busy === 'accept' ? 'Accepting…' : 'Accept terms as Client'}</button>}
-              {isProvider && <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('accept', { role: 'provider' })}>{busy === 'accept' ? 'Accepting…' : 'Accept terms as Freelancer'}</button>}
+              {isClient && <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('accept', { role: 'client', actorId: item.clientId }, { 'x-actor-id': item.clientId, 'x-actor-role': 'client' })}>{busy === 'accept' ? 'Accepting…' : 'Accept terms as Client'}</button>}
+              {isProvider && <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('accept', { role: 'provider', actorId: item.providerId }, { 'x-actor-id': item.providerId, 'x-actor-role': 'freelancer' })}>{busy === 'accept' ? 'Accepting…' : 'Accept terms as Freelancer'}</button>}
             </div>
           )}
           {isClient && item.state === 'awaiting_funding' && (
             <div className="panel side-card">
-              <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('fund', { mode: 'demo' })}>{busy === 'fund' ? 'Funding…' : 'Fund escrow · preview only'}</button>
+              <button className="button button-primary" disabled={Boolean(busy)} onClick={() => void act('fund', { mode: 'demo', actorId: item.clientId }, { 'x-actor-id': item.clientId, 'x-actor-role': 'client' })}>{busy === 'fund' ? 'Funding…' : 'Fund escrow · preview only'}</button>
               <small className="demo-warning">Real Devnet funding requires a deployed program and wallet signature.</small>
             </div>
           )}
@@ -695,7 +712,7 @@ function DemoWorkspace() {
           'x-actor-id': role === 'client' ? 'demo-client' : 'demo-freelancer',
           'x-actor-role': role,
         },
-        body: JSON.stringify(body)
+        body: JSON.stringify({ ...body, actorId: role === 'client' ? 'demo-client' : 'demo-freelancer' })
       })
       setAgreement(result)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Action rejected.') }

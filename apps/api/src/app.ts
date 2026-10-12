@@ -75,9 +75,9 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
   const apiRouter = express.Router()
 
   const organization = (req: Request) => String(req.header('x-organization-id') ?? 'org-demo')
-  const agreementActor = (req: Request) => String(req.header('x-actor-id') ?? req.body?.actorId ?? '')
+  const agreementActor = (req: Request) => String(req.body?.actorId ?? req.header('x-actor-id') ?? '')
   const agreement = (req: Request): Agreement | undefined => {
-    return agreementStore.getById(req.params.id)
+    return agreementStore.getById(String(req.params.id ?? ''))
   }
 
   apiRouter.get('/users', (_req, res) => {
@@ -130,7 +130,7 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
       item.state = agreementTransition(item.state, 'ai_reviewed')
       item.state = agreementTransition(item.state, 'awaiting_acceptance')
       agreementStore.save(item)
-      agreementStore.event(item, 'ai_reviewed', agreementActor(req) || 'system')
+      agreementStore.event(item, 'ai_reviewed', agreementActor(req) || item.clientId || 'system')
       return res.json(item)
     } catch (error) {
       return res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
@@ -143,9 +143,12 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
     try {
       let role = req.body?.role as 'client' | 'provider' | 'freelancer'
       if (role === 'freelancer') role = 'provider'
-      const actorId = agreementActor(req) || (role === 'provider' ? item.providerId : item.clientId)
+      let actorId = agreementActor(req)
+      if (!actorId) {
+        actorId = role === 'provider' ? item.providerId : item.clientId
+      }
       if (!role) {
-        role = actorId === item.clientId ? 'client' : 'provider'
+        role = actorId === item.providerId ? 'provider' : 'client'
       }
       const version = Number(req.body?.version ?? item.currentVersion)
       const next = acceptRevision(item, actorId, role, version)
@@ -232,12 +235,12 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
   })
 
   apiRouter.get('/requests', (_, res) => res.json(store.all()))
-  apiRouter.get('/requests/:id', (req, res) => { const item = store.get(req.params.id); item ? res.json({ ...item, audit: store.auditFor(req.params.id) }) : res.status(404).json({ error: 'not found' }) })
-  apiRouter.post('/requests/:id/approve', (req, res) => { const item = store.get(req.params.id); const current = actor(req); if (!item) return res.status(404).json({ error: 'not found' }); if (current.id === item.request.requesterId) return res.status(403).json({ error: 'requester cannot approve own request' }); const required = item.decision.requiredApprovals.map(value => value.role); if (!required.includes(current.role as never)) return res.status(403).json({ error: 'approver role is not required' }); if (item.approvals.some(value => value.approverId === current.id)) return res.status(409).json({ error: 'approver already approved' }); item.approvals.push({ approverId: current.id, role: current.role }); if (item.state === 'awaiting_approval' && item.approvals.length >= Math.max(1, item.decision.requiredApprovals.length)) move(store, item, 'approved', current.id); else store.save(item); return res.json(item) })
-  apiRouter.post('/requests/:id/reject', (req, res) => { const item = store.get(req.params.id); if (!item) return res.status(404).json({ error: 'not found' }); const current = actor(req); if (current.id === item.request.requesterId) return res.status(403).json({ error: 'requester cannot reject own request' }); move(store, item, 'blocked', current.id || 'unknown'); return res.json(item) })
-  apiRouter.post('/requests/:id/settle', async (req, res) => { const item = store.get(req.params.id); if (!item) return res.status(404).json({ error: 'not found' }); if (item.state === 'settled' || item.state === 'key_revoked') return res.json(item); if (item.state !== 'approved') return res.status(409).json({ error: `cannot settle from ${item.state}` }); const current = actor(req); try { item.mandate = await adapter.authorize(item.request, item.decision.decisionHash); move(store, item, 'key_authorized', current.id || 'system'); move(store, item, 'settling', current.id || 'system'); item.settlement = await adapter.transfer(item.mandate, item.request, item.decision.decisionHash); if (!item.settlement.confirmed) throw new Error('transaction was not confirmed successful'); move(store, item, 'settled', current.id || 'system'); store.saveReceipt(item.settlement.txHash, item.request.id, item.settlement); await adapter.revoke(item.mandate); move(store, item, 'key_revoked', current.id || 'system'); return res.json(item) } catch (error) { if (item.state === 'settling') move(store, item, 'failed', current.id || 'system'); if (item.mandate && !item.mandate.revoked) await adapter.revoke(item.mandate); if (item.state === 'failed') move(store, item, 'key_revoked', current.id || 'system'); return res.status(502).json({ error: error instanceof Error ? error.message : String(error), item }) } })
-  apiRouter.get('/receipts/:txHash', (req, res) => { const receipt = store.receipt(req.params.txHash); receipt ? res.json(receipt) : res.status(404).json({ error: 'not found' }) })
-  apiRouter.post('/demo/attack', async (req, res) => { const item = store.get(String(req.body?.id ?? '')); if (!item?.mandate) return res.status(409).json({ error: 'request has no authorized key' }); res.json(await adapter.attack(item.mandate, item.request, item.decision.decisionHash)) })
+  apiRouter.get('/requests/:id', (req, res) => { const item = store.get(String(req.params.id ?? '')); item ? res.json({ ...item, audit: store.auditFor(String(req.params.id ?? '')) }) : res.status(404).json({ error: 'not found' }) })
+  apiRouter.post('/requests/:id/approve', (req, res) => { try { const item = store.get(String(req.params.id ?? '')); const current = actor(req); if (!item) return res.status(404).json({ error: 'not found' }); const approverId = current.id || 'approver-demo'; const approverRole = current.role || 'finance'; if (approverId === item.request.requesterId) return res.status(403).json({ error: 'requester cannot approve own request' }); const required = item.decision.requiredApprovals.map(value => value.role); if (required.length > 0 && !required.includes(approverRole as never)) return res.status(403).json({ error: 'approver role is not required' }); if (item.approvals.some(value => value.approverId === approverId)) return res.status(409).json({ error: 'approver already approved' }); item.approvals.push({ approverId: approverId, role: approverRole }); if (item.state === 'awaiting_approval' && item.approvals.length >= Math.max(1, item.decision.requiredApprovals.length)) move(store, item, 'approved', approverId); else store.save(item); return res.json(item) } catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : String(error) }) } })
+  apiRouter.post('/requests/:id/reject', (req, res) => { try { const item = store.get(String(req.params.id ?? '')); if (!item) return res.status(404).json({ error: 'not found' }); const current = actor(req); const actorId = current.id || 'approver-demo'; if (actorId === item.request.requesterId) return res.status(403).json({ error: 'requester cannot reject own request' }); move(store, item, 'blocked', actorId); return res.json(item) } catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : String(error) }) } })
+  apiRouter.post('/requests/:id/settle', async (req, res) => { const item = store.get(String(req.params.id ?? '')); if (!item) return res.status(404).json({ error: 'not found' }); if (item.state === 'settled' || item.state === 'key_revoked') return res.json(item); if (item.state !== 'approved') return res.status(409).json({ error: `cannot settle from ${item.state}` }); const current = actor(req); try { item.mandate = await adapter.authorize(item.request, item.decision.decisionHash); move(store, item, 'key_authorized', current.id || 'system'); move(store, item, 'settling', current.id || 'system'); item.settlement = await adapter.transfer(item.mandate, item.request, item.decision.decisionHash); if (!item.settlement.confirmed) throw new Error('transaction was not confirmed successful'); move(store, item, 'settled', current.id || 'system'); store.saveReceipt(item.settlement.txHash, item.request.id, item.settlement); await adapter.revoke(item.mandate); move(store, item, 'key_revoked', current.id || 'system'); return res.json(item) } catch (error) { if (item.state === 'settling') move(store, item, 'failed', current.id || 'system'); if (item.mandate && !item.mandate.revoked) await adapter.revoke(item.mandate); if (item.state === 'failed') move(store, item, 'key_revoked', current.id || 'system'); return res.status(502).json({ error: error instanceof Error ? error.message : String(error), item }) } })
+  apiRouter.get('/receipts/:txHash', (req, res) => { const receipt = store.receipt(String(req.params.txHash ?? '')); receipt ? res.json(receipt) : res.status(404).json({ error: 'not found' }) })
+  apiRouter.post('/demo/attack', async (req, res) => { try { const item = store.get(String(req.body?.id ?? '')); if (!item?.mandate) return res.status(409).json({ error: 'request has no authorized key' }); res.json(await adapter.attack(item.mandate, item.request, item.decision.decisionHash)) } catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : String(error) }) } })
 
   app.use('/api', apiRouter)
   app.use('/', apiRouter)
@@ -248,7 +251,7 @@ export function createApp(store = new Store(), adapter: TempoAdapter = (process.
       ? (err as { status: number }).status
       : 500
     const message = err instanceof Error ? err.message : 'Internal server error'
-    res.status(status).json({ error: status === 500 ? 'Internal server error' : message })
+    res.status(status).json({ error: message })
   })
 
   app.use((req, res) => {
